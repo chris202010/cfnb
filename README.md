@@ -502,7 +502,7 @@ git branch -M $(git remote show origin | grep "HEAD branch" | cut -d " " -f5) 2>
 > 
 > 如果你将仓库设置为 **Private（私有）**，则通过 Raw 链接访问 `ip.txt` 时必须在 URL 后附加 `?token=你的令牌` 参数才能获取内容，例如：
 > ```
-> https://raw.githubusercontent.com/用户名/仓库名/分支名/ip.txt?token=xxxxxx
+> https://raw.githubusercontent.com/用户名/仓库名/refs/heads/分支名/ip.txt?token=xxxxxx
 > ```
 > 但请注意，**部分代理工具或订阅解析器可能无法正确处理带 Token 参数的 URL**，原因包括：
 > - 不支持自定义请求头（GitHub 要求完整的 User-Agent 等头信息）
@@ -513,7 +513,7 @@ git branch -M $(git remote show origin | grep "HEAD branch" | cut -d " " -f5) 2>
 > 
 > 公开仓库的 Raw 链接无需 Token 即可访问，兼容性最佳：
 > ```
-> https://raw.githubusercontent.com/用户名/仓库名/分支名/ip.txt
+> https://raw.githubusercontent.com/用户名/仓库名/refs/heads/分支名/ip.txt
 > ```
 
 ### 验证与订阅
@@ -597,6 +597,8 @@ git branch -M $(git remote show origin | grep "HEAD branch" | cut -d " " -f5) 2>
 | 带宽测速 (curl) | ❌ 直连 | 反映本机到 CDN 的速度 |
 | API 请求类 (requests) | ✅ 跟随系统代理 | 获取节点、可用性、纯净度、微信通知等 |
 | Git 推送 (git) | ✅ 跟随系统代理 | 涉及 `github.com` 等 |
+
+> 各阶段对应域名见上方“涉及域名”列表。
 
 **涉及域名：**  
 `cm.edu.kg` · `cmliussss.net` · `090227.xyz` · `cloudflare.com` · `zjiecode.com` · `github.com` · `githubusercontent.com` · `ipapi.is`
