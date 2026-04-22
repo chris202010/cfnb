@@ -70,18 +70,20 @@ def load_config():
         "FETCH_CONNECT_TIMEOUT": 5,
         "OUTPUT_FILE": "ip.txt",
         "TEST_AVAILABILITY": True,
-        "AVAILABILITY_CHECK_API": "https://check-proxyip-api.cmliussss.net/check",
+        "AVAILABILITY_CHECK_API": "https://api.check.proxyip.cmliussss.net/check",
         "AVAILABILITY_TIMEOUT": 5,
         "AVAILABILITY_CONNECT_TIMEOUT": 5,
         "AVAILABILITY_RETRY_MAX": 2,
         "AVAILABILITY_RETRY_DELAY": 5,
+        "AVAILABILITY_PROBES": 3,
+        "AVAILABILITY_MAX_DELAY_THRESHOLD": 10,
         "FILTER_IPV6_AVAILABILITY": True,
         "FILTER_BLOCKED_COUNTRIES_ENABLED": True,
         "BLOCKED_COUNTRIES": [
-    "BD", "BI", "BY", "CD", "CF", "CN", "CU", "DE", "ET", "HK",
-    "IR", "KP", "LY", "MO", "NG", "NL", "PK", "RU", "SD", "SO",
-    "SY", "TH", "TW", "UA", "VE", "VN", "YE", "ZW"
-],
+            "BD", "BI", "BY", "CD", "CF", "CN", "CU", "DE", "ET", "HK",
+            "IR", "KP", "LY", "MO", "NG", "NL", "PK", "RU", "SD", "SO",
+            "SY", "TH", "TW", "UA", "VE", "VN", "YE", "ZW"
+        ],
         "ENABLE_IP_PURITY_CHECK": False,
         "IP_PURITY_API": "https://api.ipapi.is/",
         "IP_PURITY_WORKERS": 5,
@@ -156,6 +158,8 @@ AVAILABILITY_TIMEOUT = cfg["AVAILABILITY_TIMEOUT"]
 AVAILABILITY_CONNECT_TIMEOUT = cfg["AVAILABILITY_CONNECT_TIMEOUT"]
 AVAILABILITY_RETRY_MAX = cfg["AVAILABILITY_RETRY_MAX"]
 AVAILABILITY_RETRY_DELAY = cfg["AVAILABILITY_RETRY_DELAY"]
+AVAILABILITY_PROBES = cfg["AVAILABILITY_PROBES"]
+AVAILABILITY_MAX_DELAY_THRESHOLD = cfg["AVAILABILITY_MAX_DELAY_THRESHOLD"]
 FILTER_IPV6_AVAILABILITY = cfg["FILTER_IPV6_AVAILABILITY"]
 FILTER_BLOCKED_COUNTRIES_ENABLED = cfg["FILTER_BLOCKED_COUNTRIES_ENABLED"]
 BLOCKED_COUNTRIES = cfg["BLOCKED_COUNTRIES"]
@@ -291,43 +295,69 @@ def test_node(node_str):
 
 def check_availability(node_str):
     """
-    检测单个节点是否可用（通过 check-proxyip-api）
-    返回 (node_str, is_ok, returned_ip)
+    检测单个节点是否可用（通过新版 proxyip API），支持多次探测取最小延迟。
+    返回 (node_str, is_ok, inferred_stack, min_connect_ms, exit_info)
+        - is_ok: 可用性 boolean
+        - inferred_stack: "ipv4_only" / "ipv6_only" / "dual_stack" / "unknown"
+        - min_connect_ms: 最小 TCP 连接延迟（毫秒）
+        - exit_info: 出口 IP 详细信息字典（可选）
     """
     m = re.match(r"^(\d+\.\d+\.\d+\.\d+):(\d+)#", node_str)
     if not m:
-        return (node_str, False, "")
+        return (node_str, False, "unknown", float("inf"), {})
     ip, port = m.group(1), m.group(2)
     proxyip = f"{ip}:{port}"
 
-    try:
-        resp = requests.get(
-            AVAILABILITY_CHECK_API,
-            params={"proxyip": proxyip},
-            timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT)
-        )
-        if resp.status_code == 200:
-            data = resp.json()
-            if data.get("success") is True:
-                returned_ip = data.get("ip", "")
-                return (node_str, True, returned_ip)
-    except Exception:
-        pass
-    return (node_str, False, "")
+    probes = cfg.get("AVAILABILITY_PROBES", 3)
+    min_connect_ms = float("inf")
+    best_stack = "unknown"
+    best_exit_info = {}
+    success_count = 0
+
+    for _ in range(probes):
+        try:
+            resp = requests.get(
+                AVAILABILITY_CHECK_API,
+                params={"proxyip": proxyip},
+                timeout=(AVAILABILITY_CONNECT_TIMEOUT, AVAILABILITY_TIMEOUT)
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                if data.get("success") is True:
+                    success_count += 1
+                    probe = data.get("probe_results", {}).get("ipv6", {})
+                    connect_ms = probe.get("connect_ms", float("inf"))
+                    # 不再使用阈值过滤，保留最小延迟即可
+                    if connect_ms < min_connect_ms:
+                        min_connect_ms = connect_ms
+                        best_stack = data.get("inferred_stack", "unknown")
+                        best_exit_info = probe.get("exit", {})
+        except Exception:
+            continue
+
+    # 至少有一次成功才算可用
+    if success_count == 0:
+        return (node_str, False, "unknown", float("inf"), {})
+    
+    return (node_str, True, best_stack, min_connect_ms, best_exit_info)
 
 def availability_filter_candidates(candidates):
     """
     对候选节点进行可用性二次筛选（单轮）
-    返回 (passed_nodes, ip_info)
+    返回 (passed_nodes, ip_info, latency_info, exit_details)
         - passed_nodes: 通过检测的节点列表
-        - ip_info: 字典，key=完整节点字符串，value=落地IP
+        - ip_info: 字典，key=完整节点字符串，value=inferred_stack
+        - latency_info: 字典，key=完整节点字符串，value=最小 connect_ms（毫秒）
+        - exit_details: 字典，key=完整节点字符串，value=出口信息字典
     """
     if not TEST_AVAILABILITY or not candidates:
-        return candidates, {}
+        return candidates, {}, {}, {}
 
     print(f"\n对 {len(candidates)} 个候选节点进行可用性二次筛选...")
     passed = []
-    ip_info = {}
+    ip_info = {}          # 存储 inferred_stack 字符串
+    latency_info = {}     # 存储最小 connect_ms（毫秒）
+    exit_details = {}     # 存储完整出口信息
     completed = 0
     total = len(candidates)
     last_print = time.time()
@@ -336,34 +366,37 @@ def availability_filter_candidates(candidates):
         futures = {executor.submit(check_availability, node): node for node in candidates}
         for future in as_completed(futures):
             completed += 1
-            node_str, ok, returned_ip = future.result()
+            node_str, ok, stack, connect_ms, exit_info = future.result()
             if ok:
                 passed.append(node_str)
-                ip_info[node_str] = returned_ip
+                ip_info[node_str] = stack
+                latency_info[node_str] = connect_ms
+                exit_details[node_str] = exit_info
             now = time.time()
             if now - last_print >= PROGRESS_PRINT_INTERVAL or completed == total:
                 print(f"\r[可用性检测] 进度：{completed}/{total} ({(completed/total)*100:.1f}%) 通过数量：{len(passed)}", end="", flush=True)
                 last_print = now
     print()
-
-    return passed, ip_info
+    return passed, ip_info, latency_info, exit_details
 
 def availability_filter_with_retry(candidates):
     """
     带重试的可用性二次筛选
-    返回 (passed_nodes, ip_info)
+    返回 (passed_nodes, ip_info, latency_info, exit_details)
     """
     if not TEST_AVAILABILITY or not candidates:
-        return candidates, {}
+        return candidates, {}, {}, {}
 
     passed = []
     ip_info = {}
+    latency_info = {}
+    exit_details = {}
     for attempt in range(1, AVAILABILITY_RETRY_MAX + 1):
         print(f"\n[可用性检测] 第 {attempt} 轮检测...")
-        passed, ip_info = availability_filter_candidates(candidates)
+        passed, ip_info, latency_info, exit_details = availability_filter_candidates(candidates)
         if passed:
             print(f"✅ 可用性检测通过 {len(passed)} 个节点")
-            return passed, ip_info
+            return passed, ip_info, latency_info, exit_details
         if attempt < AVAILABILITY_RETRY_MAX:
             print(f"⚠️ 本轮可用性检测通过率为 0%，等待 {AVAILABILITY_RETRY_DELAY} 秒后重试...")
             time.sleep(AVAILABILITY_RETRY_DELAY)
@@ -374,7 +407,7 @@ def availability_filter_with_retry(candidates):
         content=f"IP 可用性检测经 {AVAILABILITY_RETRY_MAX} 轮重试后仍无节点通过，已跳过过滤，使用原候选列表继续。",
         summary="可用性检测全部失败"
     )
-    return candidates, {}
+    return candidates, {}, {}, {}
 
 def measure_bandwidth_curl(node_str):
     """
@@ -535,10 +568,11 @@ def purity_filter_with_retry(bw_results):
     else:
         return [], False
 
-def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, target_count=16, latency_map=None):
+def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, target_count=16, latency_map=None, avail_latency=None):
     """
     将优选 IP 批量更新为 Cloudflare DNS 的同名 A 记录。
-    latency_map: 可选，用于打印带延迟信息的列表
+    latency_map: TCP 延迟映射（秒）
+    avail_latency: 可用性检测延迟映射（毫秒）
     """
     if not cfg.get("CF_ENABLED", False):
         print("Cloudflare DNS 批量更新未启用。")
@@ -547,6 +581,8 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
     # 优先使用完整测速结果 + 落地信息来构建更新列表
     dns_ip_list = []
     dns_node_list = []  # 用于打印的完整节点字符串
+    filtered_by_port = 0
+    filtered_by_delay = 0
     filtered_by_ipv6 = 0
     filtered_by_country = 0
 
@@ -561,12 +597,22 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
             if ':' in node_str:
                 port = node_str.split(':')[1].split('#')[0]
                 if port != '443':
+                    filtered_by_port += 1
                     continue
 
-            # 1. 先过滤 IPv6 落地（如果启用）
+            # 0.5. 出站延迟阈值过滤（仅作用于 DNS）
+            # 保留延迟 ≤ 阈值的节点，淘汰延迟 > 阈值的节点
+            max_threshold = cfg.get("AVAILABILITY_MAX_DELAY_THRESHOLD", 0)
+            if max_threshold > 0 and avail_latency:
+                node_latency = avail_latency.get(node_str, float("inf"))
+                if node_latency > max_threshold:
+                    filtered_by_delay += 1
+                    continue
+
+            # 1. IPv6 过滤（新逻辑：根据 inferred_stack）
             if cfg.get("FILTER_IPV6_AVAILABILITY", False):
-                returned_ip = ip_info.get(node_str, "")
-                if ":" in returned_ip:   # 落地 IPv6
+                stack = ip_info.get(node_str, "unknown")
+                if stack == "ipv6_only":
                     filtered_by_ipv6 += 1
                     continue
 
@@ -586,6 +632,10 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
 
         # 打印过滤统计
         filter_parts = []
+        if filtered_by_port > 0:
+            filter_parts.append(f"非443端口过滤({filtered_by_port}个)")
+        if filtered_by_delay > 0:
+            filter_parts.append(f"出站延迟过滤({filtered_by_delay}个)")
         if cfg.get("FILTER_IPV6_AVAILABILITY", False):
             filter_parts.append(f"IPv6落地过滤({filtered_by_ipv6}个)")
         if cfg.get("FILTER_BLOCKED_COUNTRIES_ENABLED", False):
@@ -624,7 +674,13 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
         speed_map = {node: speed for node, speed in full_bw_results}
     for i, (ip, node) in enumerate(zip(dns_ip_list, dns_node_list), 1):
         speed = speed_map.get(node, 0)
-        lat_ms = latency_map.get(node, float('inf')) * 1000 if latency_map else float('inf')
+        # 优先使用 TCP 延迟，其次使用可用性检测延迟
+        lat_ms = float('inf')
+        if latency_map and node in latency_map:
+            lat_ms = latency_map[node] * 1000
+        elif avail_latency and node in avail_latency:
+            lat_ms = avail_latency[node]
+        
         if lat_ms != float('inf'):
             print(f"{i}. {node} 速度 {speed:.2f} Mbps 延迟 {lat_ms:.2f} ms")
         else:
@@ -853,7 +909,7 @@ def main():
         sys.exit(0)
 
     # 5. IP 可用性二次筛选（支持整体重试）
-    candidates_after_availability, avail_ip_info = availability_filter_with_retry(candidates)
+    candidates_after_availability, avail_ip_info, avail_latency, avail_exit_details = availability_filter_with_retry(candidates)
 
     # 6. 带宽测速（支持整体重试）
     bw_results = []
@@ -942,7 +998,8 @@ def main():
         ip_info=avail_ip_info,
         full_bw_results=dns_bw_results if 'dns_bw_results' in locals() else bw_results,
         target_count=target_dns_count,
-        latency_map=latency_map
+        latency_map=latency_map,
+        avail_latency=avail_latency
     )
 
     # 11. 同步到 GitHub
