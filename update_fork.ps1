@@ -1,7 +1,6 @@
 ﻿<#
 .SYNOPSIS
-    一键同步 fork 并安全合并令牌（Windows 最终分发版）
-    前置条件：config.json、git_sync.ps1 中已填写真实令牌
+    一键同步 fork 并安全合并令牌（修复版）
 #>
 $ErrorActionPreference = "Stop"
 $Host.UI.RawUI.WindowTitle = "Fork 更新工具"
@@ -33,7 +32,7 @@ New-Item -ItemType Directory -Force -Path $BackupDir | Out-Null
     }
 }
 
-# 从 git_sync.ps1 提取令牌信息（优先）
+# 从备份的 git_sync.ps1 中提取 GitHub 信息（使用外部 Python 脚本文件，避免变量展开问题）
 $gitSyncBackup = Join-Path $BackupDir "git_sync.ps1"
 if (-not (Test-Path $gitSyncBackup)) {
     Write-Host "错误：未找到 git_sync.ps1，请先填写令牌" -ForegroundColor Red
@@ -41,21 +40,26 @@ if (-not (Test-Path $gitSyncBackup)) {
     exit 1
 }
 
-# 使用 Python 精确解析 PowerShell 变量
-$extractScript = @"
+# 生成临时 Python 脚本，传递备份文件路径作为参数
+$tempPyExtract = Join-Path $env:TEMP "cfnb_extract_info.py"
+@'
 import re, sys
-with open(r'$gitSyncBackup', encoding='utf-8') as f:
+file_path = sys.argv[1]
+with open(file_path, encoding='utf-8') as f:
     text = f.read()
-token = re.search(r'\\\$github_token\s*=\s*"(.+?)"', text)
-user  = re.search(r'\\\$github_username\s*=\s*"(.+?)"', text)
-repo  = re.search(r'\\\$repo_name\s*=\s*"(.+?)"', text)
-branch= re.search(r'\\\$branch\s*=\s*"(.+?)"', text)
+token = re.search(r'\$github_token\s*=\s*"(.+?)"', text)
+user  = re.search(r'\$github_username\s*=\s*"(.+?)"', text)
+repo  = re.search(r'\$repo_name\s*=\s*"(.+?)"', text)
+branch= re.search(r'\$branch\s*=\s*"(.+?)"', text)
 print(token.group(1) if token else '')
 print(user.group(1) if user else '')
 print(repo.group(1) if repo else '')
 print(branch.group(1) if branch else '')
-"@
-$result = & $pythonExe -c $extractScript
+'@ | Out-File -FilePath $tempPyExtract -Encoding UTF8
+
+$result = & $pythonExe $tempPyExtract $gitSyncBackup
+Remove-Item $tempPyExtract -Force
+
 $lines = $result -split "`n"
 $Token = $lines[0].Trim()
 $Username = $lines[1].Trim()
@@ -74,7 +78,7 @@ if ([string]::IsNullOrEmpty($Branch) -or $Branch -eq "your_branch") {
     git remote set-url origin "https://${Token}@github.com/${Username}/${Repo}.git" 2>$null
     $Branch = (git remote show origin | Select-String "HEAD branch").Line -replace ".*HEAD branch: ", ""
     if ([string]::IsNullOrEmpty($Branch)) {
-        Write-Host "无法自动探测，请手动在 git_sync.ps1 中设置 \$branch = ""main""" -ForegroundColor Red
+        Write-Host "无法自动探测，请手动在 git_sync.ps1 中设置 `$branch = ""main""" -ForegroundColor Red
         Read-Host "按 Enter 键退出"
         exit 1
     }
@@ -91,7 +95,8 @@ git reset --hard "origin/$Branch"
 Write-Host "`n[4/6] 注入令牌到 config.json" -ForegroundColor Yellow
 $configBackup = Join-Path $BackupDir "config.json"
 if (Test-Path $configBackup) {
-    $mergeScript = @"
+    $tempPyMerge = Join-Path $env:TEMP "cfnb_merge_tokens.py"
+    @'
 import json, sys
 backup_file = sys.argv[1]
 current_file = 'config.json'
@@ -109,26 +114,29 @@ for key in token_fields:
 with open(current_file, 'w', encoding='utf-8') as f:
     json.dump(current, f, indent=4, ensure_ascii=False)
 print("config.json 令牌注入完成")
-"@
-    $tempPy = Join-Path $env:TEMP "cfnb_merge_tokens.py"
-    $mergeScript | Out-File -FilePath $tempPy -Encoding UTF8
-    & $pythonExe $tempPy $configBackup
-    Remove-Item $tempPy -Force
+'@ | Out-File -FilePath $tempPyMerge -Encoding UTF8
+    & $pythonExe $tempPyMerge $configBackup
+    Remove-Item $tempPyMerge -Force
 } else {
     Write-Host "未找到 config.json 备份，跳过" -ForegroundColor DarkYellow
 }
 
-Write-Host "`n[5/6] 更新 git_sync.ps1 和 git_sync.sh" -ForegroundColor Yellow
-$updatePy = @"
-import re, sys, os.path
+Write-Host "`n[5/6] 更新 git_sync.ps1 和 git_sync.sh（含 --allow-unrelated-histories）" -ForegroundColor Yellow
+$tempPySync = Join-Path $env:TEMP "cfnb_update_sync.py"
+@"
+import re, sys
 
-token, username, repo, branch = sys.argv[1:]
+token = sys.argv[1]
+username = sys.argv[2]
+repo = sys.argv[3]
+branch = sys.argv[4]
 
 def update_file(filename, pattern_map, add_allow=False):
-    if not os.path.exists(filename):
+    try:
+        with open(filename, encoding='utf-8') as f:
+            text = f.read()
+    except FileNotFoundError:
         return
-    with open(filename, 'r', encoding='utf-8') as f:
-        text = f.read()
     for pattern, replacement in pattern_map.items():
         text = re.sub(pattern, replacement, text)
     if add_allow and 'allow-unrelated-histories' not in text:
@@ -158,11 +166,9 @@ sh_patterns = {
     r'branch=".*?"': f'branch="{branch}"',
 }
 update_file('git_sync.sh', sh_patterns, add_allow=True)
-"@
-$tempPy2 = Join-Path $env:TEMP "cfnb_update_sync.py"
-$updatePy | Out-File -FilePath $tempPy2 -Encoding UTF8
-& $pythonExe $tempPy2 $Token $Username $Repo $Branch
-Remove-Item $tempPy2 -Force
+"@ | Out-File -FilePath $tempPySync -Encoding UTF8
+& $pythonExe $tempPySync $Token $Username $Repo $Branch
+Remove-Item $tempPySync -Force
 
 Write-Host "`n[6/6] 恢复 ip.txt" -ForegroundColor Yellow
 $ipBackup = Join-Path $BackupDir "ip.txt"
