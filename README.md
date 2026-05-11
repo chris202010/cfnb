@@ -423,10 +423,7 @@ python3 main.py
 > 💡 三个开关完全独立，头部/尾部可为多条，行尾为单条固定文本。  
 > 开启后只会改变 `ip.txt` 内容，不影响 Cloudflare DNS 更新（DNS 仍使用纯净节点列表）。
 
-</details>
-
-<details>
-<summary>📝 ip.txt 输出内容控制</summary>
+#### ip.txt 输出内容控制
 
 控制最终 `ip.txt` 文件中每行节点后是否附带带宽测速和 TCP 延迟信息，方便直接查看或用于其他工具解析。
 
