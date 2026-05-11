@@ -331,6 +331,17 @@ python3 main.py
 
 > 💡 若不需要 DNS 更新，将 `CF_ENABLED` 设为 `false` 即可。
 
+### DNS 原地更新及重试配置
+
+| 参数 | 类型 | 默认值 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `DNS_PUT_WORKERS` | `int` | `10` | PUT 原地更新时的最大并发线程数 |
+| `DNS_PUT_RETRY_COUNT` | `int` | `2` | 单个 PUT 更新失败后的即时重试次数 |
+| `DNS_PUT_RETRY_DELAY` | `int` | `3` | PUT 重试间隔（秒） |
+| `DNS_RECORD_TYPE` | `string` | `"A"` | DNS 记录类型，可选 `A`（IPv4）或 `AAAA`（IPv6） |
+| `DNS_DELETE_CREATE_RETRY_COUNT` | `int` | `2` | 批量删除/创建操作失败时的重试次数 |
+| `DNS_DELETE_CREATE_RETRY_DELAY` | `int` | `3` | 批量删除/创建操作重试间隔（秒） |
+
 ### 节点数据源与获取配置
 
 > [!NOTE]
@@ -476,13 +487,15 @@ python3 main.py
 
 1. 查询目标子域名下现有的所有 A 记录。
 2. 从带宽测速结果中按速度顺序挑选落地 IPv4 的节点（若启用 `FILTER_IPV6_AVAILABILITY`）。
-3. 利用 Cloudflare 批量 API **先删除所有旧记录，再创建新记录**，实现原子替换。
+3. **采用 PUT 原地更新方式**：并发修改已存在的 DNS 记录的 IP 为新的优选 IP，新旧 IP 交替时记录始终保持有效，**全程无解析真空期**。
+4. 若旧记录数量多于目标数量，自动删除多余记录；若旧记录不足，则补建新记录。
+5. 所有 API 操作（PUT 更新、删除、创建）均支持独立重试，可配置重试次数和间隔。
 
 ### 注意事项
 
 - 免费套餐单次批量操作最多支持 200 条记录，足够使用。
 - 若候选池中落地 IPv4 节点不足目标数量，则更新实际可用的数量，不会强制凑满。
-- 全量替换在极短时间内可能导致解析短暂为空，但对绝大多数场景无影响。
+- 由于采用 PUT 原地更新，整个过程中域名下始终有有效记录，**不会出现解析真空期**。即使部分记录更新失败，旧 IP 仍会被保留，不影响服务。
 
 ---
 
@@ -693,7 +706,7 @@ git branch -M $(git remote show origin | grep "HEAD branch" | cut -d " " -f5) 2>
 > 各阶段对应域名见上方“涉及域名”列表。
 
 **涉及域名：**  
-`cm.edu.kg` · `090227.xyz` · `cloudflare.com` · `zjiecode.com` · `pages.dev` · `github.com` · `githubusercontent.com`
+`cm.edu.kg` · `090227.xyz` · `cloudflare.com` · `zjiecode.com` · `pages.dev` · `ipapi.is` · `github.com` · `githubusercontent.com`
 
 **建议：**  
 1. 检查本机能否直连上述域名 → 能通设 `DIRECT`，不通设 `PROXY`  
