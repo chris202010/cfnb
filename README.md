@@ -332,7 +332,7 @@ python3 main.py
 > 💡 若不需要 DNS 更新，将 `CF_ENABLED` 设为 `false` 即可。
 
 <details>
-<summary>🔧 DNS 原地更新及重试配置（点击展开）</summary>
+<summary>🔧 DNS 原地更新及重试配置</summary>
 
 | 参数 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
