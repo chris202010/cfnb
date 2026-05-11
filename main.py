@@ -143,6 +143,12 @@ def load_config():
         "CF_PROXIED": False,
         "CF_DNS_CONNECT_TIMEOUT": 3,
         "CF_DNS_READ_TIMEOUT": 3,
+        "DNS_PUT_WORKERS": 10,
+        "DNS_PUT_RETRY_COUNT": 2,
+        "DNS_PUT_RETRY_DELAY": 3,
+        "DNS_RECORD_TYPE": "A",
+        "DNS_DELETE_CREATE_RETRY_COUNT": 2,
+        "DNS_DELETE_CREATE_RETRY_DELAY": 3,
         "ADDITIONAL_SOURCES": [],
         "FETCH_MAX_RETRIES": 3,
         "FETCH_RETRY_DELAY": 3,
@@ -229,6 +235,12 @@ CF_TTL = cfg["CF_TTL"]
 CF_PROXIED = cfg["CF_PROXIED"]
 CF_DNS_CONNECT_TIMEOUT = cfg["CF_DNS_CONNECT_TIMEOUT"]
 CF_DNS_READ_TIMEOUT = cfg["CF_DNS_READ_TIMEOUT"]
+DNS_PUT_WORKERS = cfg["DNS_PUT_WORKERS"]
+DNS_PUT_RETRY_COUNT = cfg["DNS_PUT_RETRY_COUNT"]
+DNS_PUT_RETRY_DELAY = cfg["DNS_PUT_RETRY_DELAY"]
+DNS_RECORD_TYPE = cfg["DNS_RECORD_TYPE"]
+DNS_DELETE_CREATE_RETRY_COUNT = cfg["DNS_DELETE_CREATE_RETRY_COUNT"]
+DNS_DELETE_CREATE_RETRY_DELAY = cfg["DNS_DELETE_CREATE_RETRY_DELAY"]
 ADDITIONAL_SOURCES = cfg["ADDITIONAL_SOURCES"]
 FETCH_MAX_RETRIES = cfg["FETCH_MAX_RETRIES"]
 FETCH_RETRY_DELAY = cfg["FETCH_RETRY_DELAY"]
@@ -462,7 +474,7 @@ def _resolve_countries_batch(ipports):
             completed += 1
             now = time.time()
             if now - last_print >= PROGRESS_PRINT_INTERVAL or completed == total:
-                print(f"\r    [备用API查询] 进度：{completed}/{total} ({(completed/total)*100:.1f}%)", end="", flush=True)
+                print(f"\r[备用API查询] 进度：{completed}/{total} ({(completed/total)*100:.1f}%)", end="", flush=True)
                 last_print = now
 
     if total > 0:
@@ -498,7 +510,7 @@ def _parse_text_nodes(text):
             pending.append(ipport)
 
     if pending:
-        print(f"    {len(pending)} 个标签未能识别，通过可用性检测 API 查询国家...")
+        print(f"{len(pending)} 个标签未能识别，通过可用性检测 API 查询国家...")
         resolved = _resolve_countries_batch(pending)
         for ipport, code in resolved.items():
             if code:
@@ -846,7 +858,8 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
     for attempt in range(1, DNS_UPDATE_MAX_RETRIES + 1):
         print(f"\n[DNS 更新] 尝试 {attempt}/{DNS_UPDATE_MAX_RETRIES}...")
         try:
-            list_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records?type=A&name={CF_DNS_RECORD_NAME}"
+            # 1. 查询现有所有 A 记录
+            list_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records?type={DNS_RECORD_TYPE}&name={CF_DNS_RECORD_NAME}"
             response = requests.get(list_url, headers=headers, timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
             response.raise_for_status()
             result = response.json()
@@ -855,30 +868,131 @@ def batch_update_cloudflare_dns(ip_list, ip_info=None, full_bw_results=None, tar
                 raise Exception(f"查询 DNS 记录失败: {error_detail}")
 
             existing_records = result.get('result', [])
-            deletes = [{"id": rec["id"]} for rec in existing_records]
-            posts = [
-                {
+            existing_ids = [rec["id"] for rec in existing_records]
+            total_existing = len(existing_ids)
+            target_total = len(dns_ip_list)
+
+            # 2. 原地更新（PUT）尽可能多的记录
+            update_count = min(total_existing, target_total)
+            success_updates = 0
+            failed_updates = []
+
+            # 并发 PUT 更新
+            def put_update(record_id, new_ip):
+                url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/{record_id}"
+                payload = {
+                    "type": DNS_RECORD_TYPE,
                     "name": CF_DNS_RECORD_NAME,
-                    "type": "A",
-                    "content": ip,
+                    "content": new_ip,
                     "ttl": CF_TTL,
                     "proxied": CF_PROXIED
                 }
-                for ip in dns_ip_list
-            ]
+                try:
+                    resp = requests.put(url, headers=headers, json=payload,
+                                       timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
+                    if resp.status_code == 200 and resp.json().get('success'):
+                        return True
+                    else:
+                        return False
+                except Exception:
+                    return False
 
-            batch_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/batch"
-            payload = {"deletes": deletes, "posts": posts}
-            response = requests.post(batch_url, headers=headers, json=payload, timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
-            response.raise_for_status()
-            result = response.json()
-            if not result.get('success'):
-                error_detail = result.get('errors')
-                raise Exception(f"批量更新失败: {error_detail}")
+            with ThreadPoolExecutor(max_workers=min(update_count, DNS_PUT_WORKERS)) as executor:
+                future_to_idx = {}
+                for i in range(update_count):
+                    future = executor.submit(put_update, existing_ids[i], dns_ip_list[i])
+                    future_to_idx[future] = i
 
-            success_msg = f"✅ Cloudflare DNS 批量更新成功！已将 {CF_DNS_RECORD_NAME} 指向 {len(dns_ip_list)} 个 IP。"
+                for future in as_completed(future_to_idx):
+                    idx = future_to_idx[future]
+                    try:
+                        if future.result():
+                            success_updates += 1
+                        else:
+                            failed_updates.append(idx)
+                    except Exception:
+                        failed_updates.append(idx)
+
+            # 对个别失败的记录进行即时重试（参数从配置文件读取）
+            if failed_updates:
+                for retry_round in range(DNS_PUT_RETRY_COUNT):
+                    still_failed = []
+                    for idx in failed_updates:
+                        if put_update(existing_ids[idx], dns_ip_list[idx]):
+                            success_updates += 1
+                        else:
+                            still_failed.append(idx)
+                    failed_updates = still_failed
+                    if not failed_updates:
+                        break
+                    time.sleep(DNS_PUT_RETRY_DELAY)
+
+                if failed_updates:
+                    failed_ips = [dns_ip_list[i] for i in failed_updates]
+                    print(f"⚠️ 仍有 {len(failed_updates)} 条记录 PUT 更新失败（已重试 {DNS_PUT_RETRY_COUNT} 次），旧 IP 残留：{failed_ips}")
+                    print("不影响解析，下次运行会自动重试修复。")
+                else:
+                    print("✅ 所有 PUT 更新最终成功。")
+
+            # 3. 如果旧记录多于目标数量，删除多余记录（带独立重试）
+            if total_existing > target_total:
+                delete_ids = existing_ids[target_total:]
+                batch_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/batch"
+                delete_payload = {"deletes": [{"id": rid} for rid in delete_ids]}
+                delete_success = False
+                for retry in range(DNS_DELETE_CREATE_RETRY_COUNT):
+                    try:
+                        resp = requests.post(batch_url, headers=headers, json=delete_payload,
+                                            timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
+                        if resp.status_code == 200 and resp.json().get('success'):
+                            print(f"✅ 已删除多余的 {len(delete_ids)} 条旧记录")
+                            delete_success = True
+                            break
+                        else:
+                            print(f"⚠️ 删除多余记录失败 (重试 {retry+1}/{DNS_DELETE_CREATE_RETRY_COUNT})")
+                    except Exception as e:
+                        print(f"⚠️ 删除多余记录异常 (重试 {retry+1}/{DNS_DELETE_CREATE_RETRY_COUNT}): {e}")
+                    if retry < DNS_DELETE_CREATE_RETRY_COUNT - 1:
+                        time.sleep(DNS_DELETE_CREATE_RETRY_DELAY)
+                if not delete_success:
+                    print("⚠️ 删除多余记录最终失败，解析池可能略大，下次运行会自动清理")
+
+            # 4. 如果旧记录少于目标数量，创建新记录（带独立重试）
+            if total_existing < target_total:
+                new_ips = dns_ip_list[total_existing:]
+                posts_payload = [
+                    {
+                        "name": CF_DNS_RECORD_NAME,
+                        "type": DNS_RECORD_TYPE,
+                        "content": ip,
+                        "ttl": CF_TTL,
+                        "proxied": CF_PROXIED
+                    }
+                    for ip in new_ips
+                ]
+                batch_url = f"https://api.cloudflare.com/client/v4/zones/{CF_ZONE_ID}/dns_records/batch"
+                create_payload = {"posts": posts_payload}
+                create_success = False
+                for retry in range(DNS_DELETE_CREATE_RETRY_COUNT):
+                    try:
+                        resp = requests.post(batch_url, headers=headers, json=create_payload,
+                                            timeout=(CF_DNS_CONNECT_TIMEOUT, CF_DNS_READ_TIMEOUT))
+                        if resp.status_code == 200 and resp.json().get('success'):
+                            print(f"✅ 已创建 {len(new_ips)} 条新记录")
+                            create_success = True
+                            break
+                        else:
+                            print(f"⚠️ 创建新记录失败 (重试 {retry+1}/{DNS_DELETE_CREATE_RETRY_COUNT})")
+                    except Exception as e:
+                        print(f"⚠️ 创建新记录异常 (重试 {retry+1}/{DNS_DELETE_CREATE_RETRY_COUNT}): {e}")
+                    if retry < DNS_DELETE_CREATE_RETRY_COUNT - 1:
+                        time.sleep(DNS_DELETE_CREATE_RETRY_DELAY)
+                if not create_success:
+                    print("⚠️ 创建新记录最终失败，部分 IP 未生效，下次运行会补齐")
+
+            success_msg = f"✅ Cloudflare DNS 原地更新成功！已将 {CF_DNS_RECORD_NAME} 指向 {target_total} 个 IP。"
             print(success_msg)
-            print("   注意：DNS 解析将随机返回这些 IP 中的一个，实现负载均衡。")
+            print("注意：DNS 解析将随机返回这些 IP 中的一个，实现负载均衡。")
             return
 
         except Exception as e:

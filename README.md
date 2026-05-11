@@ -331,8 +331,7 @@ python3 main.py
 
 > 💡 若不需要 DNS 更新，将 `CF_ENABLED` 设为 `false` 即可。
 
-<details>
-<summary>🔧 DNS 原地更新及重试配置</summary>
+### DNS 原地更新及重试配置
 
 | 参数 | 类型 | 默认值 | 说明 |
 | :--- | :--- | :--- | :--- |
@@ -342,8 +341,6 @@ python3 main.py
 | `DNS_RECORD_TYPE` | `string` | `"A"` | DNS 记录类型，可选 `A`（IPv4）或 `AAAA`（IPv6） |
 | `DNS_DELETE_CREATE_RETRY_COUNT` | `int` | `2` | 批量删除/创建操作失败时的重试次数 |
 | `DNS_DELETE_CREATE_RETRY_DELAY` | `int` | `3` | 批量删除/创建操作重试间隔（秒） |
-
-</details>
 
 ### 节点数据源与获取配置
 

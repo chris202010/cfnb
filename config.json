@@ -76,6 +76,24 @@
     "CF_DNS_READ_TIMEOUT": 3,
     "_comment_CF_DNS_READ_TIMEOUT": "Cloudflare API 读取超时（秒）",
 
+    "DNS_PUT_WORKERS": 10,
+    "_comment_DNS_PUT_WORKERS": "PUT 原地更新时的最大并发线程数",
+
+    "DNS_PUT_RETRY_COUNT": 2,
+    "_comment_DNS_PUT_RETRY_COUNT": "单个 PUT 更新失败后的即时重试次数",
+
+    "DNS_PUT_RETRY_DELAY": 3,
+    "_comment_DNS_PUT_RETRY_DELAY": "PUT 重试间隔（秒）",
+
+    "DNS_RECORD_TYPE": "A",
+    "_comment_DNS_RECORD_TYPE": "DNS 记录类型（A 或 AAAA）",
+
+    "DNS_DELETE_CREATE_RETRY_COUNT": 2,
+    "_comment_DNS_DELETE_CREATE_RETRY_COUNT": "批量删除/创建操作失败时的重试次数",
+
+    "DNS_DELETE_CREATE_RETRY_DELAY": 3,
+    "_comment_DNS_DELETE_CREATE_RETRY_DELAY": "批量删除/创建重试间隔（秒）",
+
     "ADDITIONAL_SOURCES": [
         {
             "url": "https://zip.cm.edu.kg/all.txt",
