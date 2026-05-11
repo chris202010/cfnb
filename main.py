@@ -145,10 +145,10 @@ def load_config():
         "CF_DNS_READ_TIMEOUT": 3,
         "DNS_PUT_WORKERS": 10,
         "DNS_PUT_RETRY_COUNT": 2,
-        "DNS_PUT_RETRY_DELAY": 3,
+        "DNS_PUT_RETRY_DELAY": 1,
         "DNS_RECORD_TYPE": "A",
         "DNS_DELETE_CREATE_RETRY_COUNT": 2,
-        "DNS_DELETE_CREATE_RETRY_DELAY": 3,
+        "DNS_DELETE_CREATE_RETRY_DELAY": 1,
         "ADDITIONAL_SOURCES": [],
         "FETCH_MAX_RETRIES": 3,
         "FETCH_RETRY_DELAY": 3,
@@ -195,6 +195,8 @@ def load_config():
         "AD_FOOTER_LINES": [],
         "AD_PERLINE_ENABLED": False,
         "AD_PERLINE_TEXT": "",
+        "IP_TXT_SHOW_BANDWIDTH": False,
+        "IP_TXT_SHOW_LATENCY": False,
     }
 
     for key, value in defaults.items():
@@ -283,6 +285,8 @@ AD_FOOTER_ENABLED = cfg["AD_FOOTER_ENABLED"]
 AD_FOOTER_LINES = cfg["AD_FOOTER_LINES"]
 AD_PERLINE_ENABLED = cfg["AD_PERLINE_ENABLED"]
 AD_PERLINE_TEXT = cfg["AD_PERLINE_TEXT"]
+IP_TXT_SHOW_BANDWIDTH = cfg["IP_TXT_SHOW_BANDWIDTH"]
+IP_TXT_SHOW_LATENCY = cfg["IP_TXT_SHOW_LATENCY"]
 
 socket.setdefaulttimeout(SOCKET_DEFAULT_TIMEOUT)
 BANDWIDTH_URL = BANDWIDTH_URL_TEMPLATE.format(bytes=int(BANDWIDTH_SIZE_MB * 1024 * 1024))
@@ -1069,17 +1073,22 @@ def sync_to_github():
 def write_ip_txt(final_nodes, output_file,
                  header_enabled, header_lines,
                  footer_enabled, footer_lines,
-                 perline_enabled, perline_text):
+                 perline_enabled, perline_text,
+                 speed_map=None, latency_map=None):
     """生成包含广告的 ip.txt"""
     with open(output_file, "w", encoding="utf-8") as f:
         if header_enabled:
             for line in header_lines:
                 f.write(line + "\n")
         for node in final_nodes:
+            line = node
+            if IP_TXT_SHOW_BANDWIDTH and speed_map and node in speed_map:
+                line += f" {speed_map[node]:.2f} Mbps"
+            if IP_TXT_SHOW_LATENCY and latency_map and node in latency_map:
+                line += f" {latency_map[node]*1000:.2f} ms"
             if perline_enabled and perline_text:
-                f.write(f"{node}{perline_text}\n")
-            else:
-                f.write(node + "\n")
+                line += perline_text
+            f.write(line + "\n")
         if footer_enabled:
             for line in footer_lines:
                 f.write(line + "\n")
@@ -1260,7 +1269,9 @@ def main():
     write_ip_txt(final_selected, OUTPUT_FILE,
                  AD_HEADER_ENABLED, AD_HEADER_LINES,
                  AD_FOOTER_ENABLED, AD_FOOTER_LINES,
-                 AD_PERLINE_ENABLED, AD_PERLINE_TEXT)
+                 AD_PERLINE_ENABLED, AD_PERLINE_TEXT,
+                 speed_map=speed_map,
+                 latency_map=latency_map)
     print(f"\n结果已保存到 {OUTPUT_FILE}（共 {len(final_selected)} 个节点）")
 
     ip_list = [node.split(':')[0] for node in final_selected]
