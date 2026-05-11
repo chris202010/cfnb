@@ -788,6 +788,7 @@ git branch -M $(git remote show origin | grep "HEAD branch" | cut -d " " -f5) 2>
 ## 🙏 致谢
 
 - 节点数据源 & 检测 API：[cmliussss](https://github.com/cmliussss)
+- IP 风险检测 API：[ipapi.is](https://ipapi.is/)
 - 微信通知服务：[WxPusher](https://wxpusher.zjiecode.com/)
 
 ---
